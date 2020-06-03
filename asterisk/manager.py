@@ -61,21 +61,16 @@ Specification
 -------------
 """
 
-import sys
-import os
 import socket
 import threading
-from six import PY3
-from six.moves import queue
-import re
-from types import *
-from time import sleep
+from queue import Queue
 
 EOL = '\r\n'
 
 
 class ManagerMsg(object):
     """A manager interface message"""
+
     def __init__(self, response):
         # the raw response, straight from the horse's mouth:
         self.response = response
@@ -111,23 +106,9 @@ class ManagerMsg(object):
 
         data = []
         for n, line in enumerate(response):
-            # all valid header lines end in \r\n in Asterisk<=13
-            # and all valid headers lines in Asterisk>13 dont's starts
-            # with 'Output:'
-            if not line.endswith('\r\n') or line.startswith('Output:'):
-                data.extend(response[n:])
-                break
             try:
                 k, v = (x.strip() for x in line.split(':', 1))
-                # if header is ChanVariable it can have more that one value
-                # we store the variable in a dictionary parsed
-                if 'ChanVariable' in k:
-                    if not self.headers.has_key('ChanVariable'):
-                        self.headers['ChanVariable']={}
-                    name, value = (x.strip() for x in v.split('=',1))
-                    self.headers['ChanVariable'][name]=value
-                else:
-                    self.headers[k] = v
+                self.headers[k] = v
             except ValueError:
                 # invalid header, start of multi-line data response
                 data.extend(response[n:])
@@ -155,8 +136,8 @@ class ManagerMsg(object):
 
 class Event(object):
     """Manager interface Events, __init__ expects and 'Event' message"""
-    def __init__(self, message):
 
+    def __init__(self, message):
         # store all of the event data
         self.message = message
         self.data = message.data
@@ -191,8 +172,9 @@ class Event(object):
 
 class Manager(object):
     def __init__(self):
-        self._sock = None     # our socket
-        self.title = None     # set by received greeting
+
+        self._sock = None  # our socket
+        self.title = None  # set by received greeting
         self._connected = threading.Event()
         self._running = threading.Event()
 
@@ -200,9 +182,9 @@ class Manager(object):
         self.hostname = socket.gethostname()
 
         # our queues
-        self._message_queue = queue.Queue()
-        self._response_queue = queue.Queue()
-        self._event_queue = queue.Queue()
+        self._message_queue = Queue()
+        self._response_queue = Queue()
+        self._event_queue = Queue()
 
         # callbacks for events
         self._event_callbacks = {}
@@ -215,8 +197,7 @@ class Manager(object):
 
         # some threads
         self.message_thread = threading.Thread(target=self.message_loop)
-        self.event_dispatch_thread = threading.Thread(
-            target=self.event_dispatch)
+        self.event_dispatch_thread = threading.Thread(target=self.event_dispatch)
 
         self.message_thread.setDaemon(True)
         self.event_dispatch_thread.setDaemon(True)
@@ -239,7 +220,7 @@ class Manager(object):
             self._seq += 1
             self._seqlock.release()
 
-    def send_action(self, cdict={}, **kwargs):
+    def send_action(self, cdict: dict, **kwargs):
         """
         Send a command to the manager
 
@@ -282,7 +263,7 @@ class Manager(object):
 
         # lock the socket and send our command
         try:
-            self._sock.write(command.encode('utf8','ignore'))
+            self._sock.write(command.encode('utf8', 'ignore'))
             self._sock.flush()
         except socket.error as e:
             raise ManagerSocketException(e.errno, e.strerror)
@@ -293,7 +274,7 @@ class Manager(object):
 
         if not response:
             raise ManagerSocketException(0, 'Connection Terminated')
-
+        self._response_queue.task_done()
         return response
 
     def _receive_data(self):
@@ -305,14 +286,14 @@ class Manager(object):
         status = False
         wait_for_marker = False
         eolcount = 0
-        # loop while we are still running and connected
+        # loop while we are sill running and connected
         while self._running.isSet() and self._connected.isSet():
             try:
                 lines = []
                 for line in self._sock:
-                    line = line.decode('utf8','ignore')
+                    line = line.decode('utf8', 'ignore')
                     # check to see if this is the greeting line
-                    if not self.title and '/' in line and not ':' in line:
+                    if not self.title and '/' in line and ':' not in line:
                         # store the title of the manager we are connecting to:
                         self.title = line.split('/')[0].strip()
                         # store the version of the manager we are connecting to:
@@ -342,7 +323,7 @@ class Manager(object):
 
                     # line not ending in \r\n or without ':' isn't a
                     # valid header and starts multiline response
-                    if not line.endswith('\r\n') or ':' not in line:
+                    if not line.endswith(EOL) or ':' not in line:
                         multiline = True
                     # Response: Follows indicates we should wait for end
                     # marker --END COMMAND--
@@ -431,6 +412,7 @@ class Manager(object):
                     self._response_queue.put(message)
                 else:
                     print('No clue what we got\n%s' % message.data)
+                self._message_queue.task_done()
         finally:
             # wait for our data receiving thread to exit
             t.join()
@@ -457,8 +439,9 @@ class Manager(object):
             for callback in callbacks:
                 if callback(ev, self):
                     break
+            self._event_queue.task_done()
 
-    def connect(self, host, port=5038, buffer_size=0):
+    def connect(self, host, port=5038, buffer_size=1000000):
         """Connect to the manager interface"""
 
         if self._connected.isSet():
@@ -474,10 +457,7 @@ class Manager(object):
         try:
             _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             _sock.connect((host, port))
-            if PY3:
-                self._sock = _sock.makefile(mode='rwb', buffering=buffer_size)
-            else:
-                self._sock = _sock.makefile()
+            self._sock = _sock.makefile(mode='rwb', buffering=buffer_size)
             _sock.close()
         except socket.error as e:
             raise ManagerSocketException(e.errno, e.strerror)
@@ -493,7 +473,9 @@ class Manager(object):
         self.event_dispatch_thread.start()
 
         # get our initial connection response
-        return self._response_queue.get()
+        r = self._response_queue.get()
+        self._response_queue.task_done()
+        return r
 
     def close(self):
         """Shutdown the connection to the manager"""
@@ -563,22 +545,8 @@ class Manager(object):
 
         return response
 
-    def redirect(self, channel, exten, priority='1', extra_channel='', context=''):
-        """Redirect a channel"""
-
-        cdict = {'Action': 'Redirect'}
-        cdict['Channel'] = channel
-        cdict['Exten'] = exten
-        cdict['Priority'] = priority
-        if context:
-            cdict['Context'] = context
-        if extra_channel:
-            cdict['ExtraChannel'] = extra_channel
-        response = self.send_action(cdict)
-
-        return response
-
-    def originate(self, channel, exten, context='', priority='', timeout='', application='', data='', caller_id='', run_async=False, earlymedia='false', account='', variables={}):
+    def originate(self, channel, exten, context='', priority='', timeout='', application='', data='', caller_id='',
+                  run_async=False, earlymedia='false', account='', variables={}):
         """Originate a call"""
 
         cdict = {'Action': 'Originate'}
@@ -723,6 +691,7 @@ class Manager(object):
         cdict['Val'] = val
         response = self.send_action(cdict)
         return response
+
 
 class ManagerException(Exception):
     pass
