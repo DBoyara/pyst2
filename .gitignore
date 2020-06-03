@@ -16,6 +16,6 @@ env/
 .env/
 venv/
 __pycache__/
-
+.idea/
 # Auto-generated files.
 MANIFEST
